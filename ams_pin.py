@@ -170,30 +170,3 @@ def get_virtual_pins(printer):
     return chip
 
 
-def _load_config_impl(config):
-    """Internal helper that returns the global pin manager."""
-    # Access the name so the section is considered valid even though it has
-    # no options.
-    config.get_name()
-    return get_virtual_pins(config.get_printer())
-
-
-def load_config(config):
-    """Entry point for a bare `[ams_pin]` section."""
-    return _load_config_impl(config)
-
-
-def load_config_prefix(config):
-    """Prefix handler allowing `[ams_pin pinX]` sections."""
-    name = config.get_name().split()[-1]
-    if name == 'ams_pin':
-        return _load_config_impl(config)
-    chip = get_virtual_pins(config.get_printer())
-    pin = chip.pins.get(name)
-    if pin is None:
-        raise config.error('Unknown ams pin %s' % name)
-    return pin
-
-
-# Only expose the entry point to Klipper
-__all__ = ['load_config', 'load_config_prefix']
