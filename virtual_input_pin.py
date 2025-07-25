@@ -1,12 +1,13 @@
-"""Virtual input pin module for Klipper.
+"""Global virtual input pins for Klipper.
 
-This module provides a software-based **input** pin that can be
-referenced using the ``ams_pin:`` prefix.  The pin is implemented as an
-endstop-style input and cannot be configured for output.  G-code
-commands allow software to update or query the stored state.
+This module provides eight software-based input pins accessible via the
+``ams_pin:`` prefix.  Pins are named ``pin1`` through ``pin8`` and may be
+used anywhere an endstop style input is expected.  G-code commands allow
+software to update or query the stored state.
 """
 
 import logging
+
 
 class VirtualEndstop:
     """Simple endstop object backed by a virtual pin."""
@@ -38,54 +39,18 @@ class VirtualEndstop:
     def query_endstop(self, print_time):
         return bool(self._vpin.state) ^ bool(self._invert)
 
-class VirtualInputPin:
-    """Manage a single virtual input pin."""
-    def __init__(self, config):
-        self.printer = config.get_printer()
-        self.name = config.get_name().split()[-1]
-        self.state = config.getboolean('initial_value', False)
+
+class VirtualPin:
+    """Store state and callbacks for a single virtual pin."""
+    def __init__(self, printer, name):
+        self.printer = printer
+        self.name = name
+        self.state = False
         self._watchers = set()
-        # Track button handlers for compatibility with modules that
-        # expect MCU-style callbacks (eg, buttons.py)
         self._button_handlers = []
         self._ack_count = 0
-        self._config_callbacks = []
-
-        # Run deferred config callbacks after Klipper is ready
-        self.printer.register_event_handler('klippy:ready',
-                                            self._run_config_callbacks)
-
-        ppins = self.printer.lookup_object('pins')
-        try:
-            ppins.register_chip('ams_pin', self)
-        except ppins.error:
-            pass
-
-        gcode = self.printer.lookup_object('gcode')
-        cname = self.name
-        gcode.register_mux_command('SET_AMS_PIN', 'PIN', cname,
-                                   self.cmd_SET_AMS_PIN,
-                                   desc=self.cmd_SET_AMS_PIN_help)
-        gcode.register_mux_command('QUERY_AMS_PIN', 'PIN', cname,
-                                   self.cmd_QUERY_AMS_PIN,
-                                   desc=self.cmd_QUERY_AMS_PIN_help)
-
-    # called by the pins framework
-    def setup_pin(self, pin_type, pin_params):
-        ppins = self.printer.lookup_object('pins')
-        pin_name = pin_params['pin']
-        if pin_name != self.name:
-            obj = self.printer.lookup_object('ams_pin ' + pin_name, None)
-            if obj is None:
-                raise ppins.error('ams_pin %s not configured' % (pin_name,))
-            return obj.setup_pin(pin_type, pin_params)
-        if pin_type != 'endstop':
-            raise ppins.error('ams_pin pins only support endstop type')
-        return VirtualEndstop(self, pin_params['invert'])
 
     def register_watcher(self, callback):
-        """Register a callback for state changes and invoke it with the
-        current state."""
         self._watchers.add(callback)
         try:
             callback(self.state)
@@ -122,18 +87,6 @@ class VirtualInputPin:
     # Minimal MCU interface for compatibility with modules such as
     # buttons.py that expect MCU objects
     # --------------------------------------------------------------
-    def register_config_callback(self, cb):
-        """Store configuration callbacks to run when Klipper is ready."""
-        self._config_callbacks.append(cb)
-
-    def _run_config_callbacks(self, eventtime=None):
-        for cb in self._config_callbacks:
-            try:
-                cb()
-            except Exception:
-                logging.exception('Virtual pin config callback error')
-        self._config_callbacks = []
-
     def create_oid(self):
         self._ack_count = 0
         return 0
@@ -171,19 +124,74 @@ class VirtualInputPin:
             except Exception:
                 logging.exception('Virtual button handler error')
 
-    cmd_SET_AMS_PIN_help = 'Set the value of a virtual input pin'
-    def cmd_SET_AMS_PIN(self, gcmd):
-        val = gcmd.get_int('VALUE', 1)
-        self.set_value(val)
 
+class VirtualPins:
+    """Manage eight global virtual pins."""
+    PIN_NAMES = [f'pin{i}' for i in range(1, 9)]
+
+    def __init__(self, printer):
+        self.printer = printer
+        self.pins = {}
+
+        for name in self.PIN_NAMES:
+            pin = VirtualPin(self.printer, name)
+            self.pins[name] = pin
+            try:
+                self.printer.add_object('ams_pin ' + name, pin)
+            except Exception:
+                # FakePrinter in tests stores objects in a dict
+                self.printer.objects['ams_pin ' + name] = pin
+
+        ppins = self.printer.lookup_object('pins')
+        ppins.register_chip('ams_pin', self)
+
+        gcode = self.printer.lookup_object('gcode')
+        for name in self.PIN_NAMES:
+            gcode.register_mux_command('SET_AMS_PIN', 'PIN', name,
+                                       self._set_factory(name),
+                                       desc=self.cmd_SET_AMS_PIN_help)
+            gcode.register_mux_command('QUERY_AMS_PIN', 'PIN', name,
+                                       self._query_factory(name),
+                                       desc=self.cmd_QUERY_AMS_PIN_help)
+
+    def _set_factory(self, name):
+        def handler(gcmd, pin=name):
+            val = gcmd.get_int('VALUE', 1)
+            self.pins[pin].set_value(val)
+        return handler
+
+    def _query_factory(self, name):
+        def handler(gcmd, pin=name):
+            state = self.pins[pin].state
+            gcmd.respond_info('ams_pin %s: %d' % (pin, state))
+        return handler
+
+    def setup_pin(self, pin_type, pin_params):
+        ppins = self.printer.lookup_object('pins')
+        if pin_type != 'endstop':
+            raise ppins.error('ams_pin pins only support endstop type')
+        pin_name = pin_params['pin']
+        pin = self.pins.get(pin_name)
+        if pin is None:
+            raise ppins.error('ams_pin %s not configured' % (pin_name,))
+        return VirtualEndstop(pin, pin_params['invert'])
+
+    cmd_SET_AMS_PIN_help = 'Set the value of a virtual input pin'
     cmd_QUERY_AMS_PIN_help = 'Report the value of a virtual input pin'
-    def cmd_QUERY_AMS_PIN(self, gcmd):
-        gcmd.respond_info('ams_pin %s: %d' % (self.name, self.state))
+
+
+_chip = None
 
 
 def load_config_prefix(config):
     """Config handler for [ams_pin] sections."""
-    prefix = config.get_name().split()[0]
-    if prefix != 'ams_pin':
-        raise config.error('Unknown prefix %s' % prefix)
-    return VirtualInputPin(config)
+    global _chip
+    if _chip is None:
+        _chip = VirtualPins(config.get_printer())
+    name = config.get_name().split()[-1]
+    pin = _chip.pins.get(name)
+    if pin is not None:
+        return pin
+    if name != 'ams_pin':
+        raise config.error('Unknown ams pin %s' % name)
+    return _chip
