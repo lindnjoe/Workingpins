@@ -24,7 +24,3 @@ Example usage with the provided virtual filament sensor module:
 [virtual_filament_sensor my_sensor]
 pin: ams_pin:pin1
 ```
-
-If Klipper reports `Unknown pin chip name 'ams_pin'` during startup, ensure
-that the `[ams_pin]` section appears before any other section that uses the
-`ams_pin:` prefix.
